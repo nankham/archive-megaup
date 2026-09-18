@@ -19,17 +19,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Environment variables
-API_ID = int(os.environ["API_ID"])[cite: 1]
-API_HASH = os.environ["API_HASH"][cite: 1]
-BOT_TOKEN = os.environ["BOT_TOKEN"][cite: 1]
-TEMP_DIR = pathlib.Path(os.environ.get("TEMP_DOWNLOAD_DIR", "/downloads")).resolve()[cite: 1]
-MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", str(5 * 1024 ** 3)))  # Default limit: 5 GB
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+TEMP_DIR = pathlib.Path(os.environ.get("TEMP_DOWNLOAD_DIR", "/downloads")).resolve()
+MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", str(5 * 1024 ** 3)))  # Default: 5 GB
 
 # Authorization whitelist
-_raw_ids = os.environ.get("ALLOWED_USER_IDS", "")[cite: 1]
+_raw_ids = os.environ.get("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS: set[int] = {
     int(uid.strip()) for uid in _raw_ids.split(",") if uid.strip().isdigit()
-}[cite: 1]
+}
 
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -195,7 +195,7 @@ async def pickformat(client, cq):
             success = False
             for attempt in range(3):
                 try:
-                    # 1. Download stream to local VM storage
+                    # 1. Download stream to local storage
                     await m.edit(f"⬇️ Downloading ({idx}/{total_files}):\n`{filename}`")
                     await asyncio.to_thread(stream_download, download_url, local_path)
 
