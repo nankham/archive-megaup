@@ -1,49 +1,46 @@
-```markdown
-# Rclone Cloud Archive Automation ☁️
-An automated solution for syncing and archiving data across multiple cloud storage providers using the power of Rclone and Python.
+# Archive.org to Megaup Telegram Bot 🚀
 
-## 🚀 Key Features
-* **Multi-Cloud Sync:** Leveraging Rclone to support over 40+ cloud storage providers.
-* **Automated Workflows:** Python-based logic to trigger sync/archive tasks efficiently.
-* **Scalable & Portable:** Designed to run in Docker containers for consistent performance.
-* **Secure:** Sensitive data and remote configurations are handled via environment variables and encrypted config files.
+An automated Telegram bot pipeline that downloads media/music files from Archive.org items and directly uploads them to **Megaup.net** cloud storage using the Yetishare v2 API.
+
+## 🌟 Key Features
+* **Telegram Bot Interface:** Control downloads directly via Telegram commands using the official Telegram Bot API (Bot Token).
+* **Metadata Extraction:** Inspects Archive.org items, parses file formats, and lets you select specific media formats via inline keyboard buttons.
+* **Direct Megaup API v2 Integration:** Uploads downloaded media files straight to designated Megaup folders via REST API endpoints.
+* **Auto-Cleanup & Safe Storage:** Deletes downloaded temporary files chunk-by-chunk and file-by-file immediately upon upload completion to prevent disk exhaustion.
+* **Security Whitelist:** Restricts access using an allowed user ID whitelist (`ALLOWED_USER_IDS`) to prevent unauthorized usage.
+* **Containerized & Production Ready:** Optimized Docker container running as a non-privileged user.
 
 ## 🛠 Tech Stack
-* **Core Tool:** Rclone
-* **Scripting:** Python
-* **Environment:** Dockerized for easy setup
-* **Support:** Works with S3, Google Drive, Dropbox, OneDrive, and more.
+* **Language:** Python 3.11
+* **Framework:** Pyrogram (Telegram Bot API)
+* **Storage Provider:** Megaup.net (Yetishare v2 Engine)
+* **Containerization:** Docker
 
-## 🚀 Quick Start
-1. **Prepare Rclone Config:** Ensure your `rclone.conf` is ready.
-2. **Environment Setup:** Set your remote paths and sync intervals in the `.env` file.
-3. **Deploy:**
+---
+
+## ⚙️ Environment Variables
+
+Configure the following variables in your `.env` file or hosting environment:
+
+| Variable | Description | Required | Default |
+| :--- | :--- | :--- | :--- |
+| `BOT_TOKEN` | Telegram Bot Token (from [@BotFather](https://t.me/BotFather)) | Yes | — |
+| `API_ID` | Telegram API ID (from [my.telegram.org](https://my.telegram.org)) | Yes | — |
+| `API_HASH` | Telegram API Hash (from [my.telegram.org](https://my.telegram.org)) | Yes | — |
+| `ALLOWED_USER_IDS` | Comma-separated Telegram User IDs allowed to use the bot (e.g. `12345678,87654321`) | Yes | — |
+| `MEGAUP_API_KEY` | Megaup API Key 1 (Upload Key) | No | Script Default |
+| `MEGAUP_FOLDER_ID` | Target Megaup Folder ID | No | `63172` |
+| `MEGAUP_UPLOAD_URL` | Megaup Upload Endpoint | No | `https://megaup.net/api/v2/file/upload` |
+| `TEMP_DOWNLOAD_DIR` | Temporary download storage path | No | `/downloads` |
+| `MAX_FILE_BYTES` | Maximum allowed file size in bytes | No | `5368709120` (5 GB) |
+
+---
+
+## 🚀 Quick Start & Deployment
+
+### 1. Local / Docker Deployment
+
+1. **Clone the repository:**
    ```bash
-   docker build -t archive-rclone .
-   docker run --env-file .env archive-rclone
-# Archive.org → (rclone) Telegram Bot (Bot API Version)
-
-This bot uses **Telegram Bot API** (Bot Token), not user session.  
-It can be safely deployed with just a Bot Token, API ID, and API Hash.
-
-## Features
-- Accepts `/download <archive.org link>` commands.
-- Fetches metadata from archive.org and lists available files (formats).
-- User can pick file via inline buttons.
-- Downloads file to server, uploads to OneDrive Business using `rclone`.
-- Uploads your `rclone.conf` file via `/set_rclone_conf`.
-- Cleans up temporary files after upload.
-
-## Environment Variables
-- `BOT_TOKEN` — Telegram bot token (from @BotFather)
-- `API_ID` — Telegram API ID (from my.telegram.org)
-- `API_HASH` — Telegram API Hash
-- `RCLONE_CONFIG_PATH` — path to rclone config file (default `/config/rclone.conf`)
-- `TEMP_DOWNLOAD_DIR` — path to temp downloads (default `/downloads`)
-
-## Deployment (Railway)
-1. Create a new Railway project.
-2. Add your secrets (`BOT_TOKEN`, `API_ID`, `API_HASH`, ...).
-3. Deploy directly from this repo (Dockerfile included).
-4. Use `/set_rclone_conf` to upload your rclone.conf file, or mount one into `/config/rclone.conf`.
-
+   git clone <repo-url>
+   cd <repo-folder>
