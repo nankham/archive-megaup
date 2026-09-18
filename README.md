@@ -43,3 +43,8 @@ Configure the following variables in your `.env` file or hosting environment:
 3. Send the download command along with an Archive.org details URL:
    ```text
    /download [https://archive.org/details/](https://archive.org/details/)<identifier>
+
+## 🚀 Build and Run With Docker Command
+
+* docker build -t archive-megaup-bot .
+* docker run -d --name archive-megaup --env-file .env archive-megaup-bot
