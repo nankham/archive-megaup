@@ -9,17 +9,19 @@ MEGAUP_UPLOAD_URL = os.environ.get(
     "MEGAUP_UPLOAD_URL", 
     "https://megaup.net/api/v2/file/upload"
 )
-MEGAUP_API_KEY = os.environ.get(
-    "MEGAUP_API_KEY", 
-    "4MGSbiIusAdcGloqCZsatuqMVeovZjTklKGvlEtLZRb6i7BcDmW0wrh6LRnCPxRz"
-)
-MEGAUP_FOLDER_ID = os.environ.get("MEGAUP_FOLDER_ID", "63172")[cite: 1]
+MEGAUP_API_KEY = os.environ.get("MEGAUP_API_KEY")
+MEGAUP_FOLDER_ID = os.environ.get("MEGAUP_FOLDER_ID")
 
 def megaup_upload(file_path: pathlib.Path | str) -> dict:
     """
-    Megaup.net API v2 သို့ Local file အား multipart/form-data ဖြင့် upload တင်ပြီး
-    API မှ ပြန်လာသော JSON response ကို return ပေးသည်။
+    Upload a local file to Megaup.net API v2.
+    Requires MEGAUP_API_KEY and MEGAUP_FOLDER_ID to be configured.
     """
+    if not MEGAUP_API_KEY:
+        raise ValueError("Missing required environment variable: MEGAUP_API_KEY")
+    if not MEGAUP_FOLDER_ID:
+        raise ValueError("Missing required environment variable: MEGAUP_FOLDER_ID")
+
     path = pathlib.Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"File not found: {path}")
@@ -33,7 +35,6 @@ def megaup_upload(file_path: pathlib.Path | str) -> dict:
     logger.info("Uploading %s (%.2f MB) to Megaup folder %s...", 
                 path.name, file_size_mb, MEGAUP_FOLDER_ID)
 
-    # ဖိုင်အရွယ်အစားကြီးနိုင်သဖြင့် timeout အား ၁၅ မိနစ် (900s) ထားရှိသည်
     with open(path, "rb") as fh:
         files = {"file": (path.name, fh)}
         response = requests.post(
@@ -46,7 +47,6 @@ def megaup_upload(file_path: pathlib.Path | str) -> dict:
     response.raise_for_status()
     res_json = response.json()
 
-    # Yetishare v2 engine error status စစ်ဆေးခြင်း
     if res_json.get("error") or res_json.get("status") == "error":
         err_msg = res_json.get("message") or res_json.get("response") or "Upload failed"
         raise RuntimeError(f"Megaup API Error: {err_msg}")
