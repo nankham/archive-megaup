@@ -7,6 +7,8 @@ import requests
 logger = logging.getLogger(__name__)
 
 MEGAUP_BASE = "https://megaup.net"
+# Screenshot အရ တကယ့် Web Upload Endpoint URL
+MEGAUP_UPLOAD_URL = f"{MEGAUP_BASE}/account/ajax/uploader"
 MEGAUP_COOKIE_FILEHOSTING = os.environ.get("MEGAUP_COOKIE_FILEHOSTING")
 MEGAUP_COOKIE_CFCLEARANCE = os.environ.get("MEGAUP_COOKIE_CFCLEARANCE")
 MEGAUP_FOLDER_ID = os.environ.get("MEGAUP_FOLDER_ID")
@@ -16,8 +18,7 @@ CHUNK_SIZE = 15 * 1024 * 1024
 
 def megaup_upload(file_path: pathlib.Path | str, progress_callback=None) -> dict:
     """
-    Upload a file using web session cookies (filehosting + cf_clearance)
-    to bypass Free User API restriction and Cloudflare.
+    Upload a file to Megaup via /account/ajax/uploader using session cookies.
     """
     if not MEGAUP_COOKIE_FILEHOSTING:
         raise ValueError("Missing required environment variable: MEGAUP_COOKIE_FILEHOSTING")
@@ -31,11 +32,9 @@ def megaup_upload(file_path: pathlib.Path | str, progress_callback=None) -> dict
     total_size = path.stat().st_size
     file_name = path.name
     c_tracker = str(uuid.uuid4())
-    upload_url = f"{MEGAUP_BASE}/core/page/ajax/file_upload_handler.ajax.php"
 
     session = requests.Session()
 
-    # Browser Cookie string တည်ဆောက်ခြင်း
     cookie_parts = [f"filehosting={MEGAUP_COOKIE_FILEHOSTING}"]
     if MEGAUP_COOKIE_CFCLEARANCE:
         cookie_parts.append(f"cf_clearance={MEGAUP_COOKIE_CFCLEARANCE}")
@@ -80,14 +79,14 @@ def megaup_upload(file_path: pathlib.Path | str, progress_callback=None) -> dict
             }
 
             response = session.post(
-                upload_url,
+                MEGAUP_UPLOAD_URL,
                 data=form_data,
                 files=files,
                 headers=headers,
                 timeout=180,
             )
             response.raise_for_status()
-            
+
             try:
                 res_json = response.json()
             except Exception:
@@ -99,7 +98,6 @@ def megaup_upload(file_path: pathlib.Path | str, progress_callback=None) -> dict
 
     logger.info("Megaup final response for %s: %s", file_name, res_json)
 
-    # Yetishare response normalization
     if isinstance(res_json, list) and len(res_json) > 0:
         res_json = res_json[0]
 
