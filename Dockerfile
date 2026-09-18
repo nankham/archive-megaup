@@ -1,7 +1,7 @@
 # Base image
 FROM python:3.11-slim
 
-# System dependencies (removed curl and unzip as rclone is no longer needed)
+# System dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates git ffmpeg && \
@@ -27,9 +27,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p /downloads && \
     chown -R botuser:botuser /downloads && \
     chmod 750 /downloads
-
-# Define volume for temp downloads
-VOLUME ["/downloads"]
 
 # Environment variables defaults
 ENV TEMP_DOWNLOAD_DIR=/downloads \
