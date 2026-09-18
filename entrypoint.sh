@@ -4,9 +4,9 @@ set -e
 mkdir -p "${TEMP_DOWNLOAD_DIR:-/downloads}"
 chmod 750 "${TEMP_DOWNLOAD_DIR:-/downloads}"
 
-# Validate required Megaup credentials from environment
-if [ -z "$MEGAUP_API_KEY" ] || [ -z "$MEGAUP_API_KEY2" ] || [ -z "$MEGAUP_FOLDER_ID" ]; then
-  echo "[ERROR] MEGAUP_API_KEY, MEGAUP_API_KEY2 and MEGAUP_FOLDER_ID must be set in environment!"
+# Validate required Megaup Web Session & Folder ID
+if [ -z "$MEGAUP_COOKIE_FILEHOSTING" ] || [ -z "$MEGAUP_FOLDER_ID" ]; then
+  echo "[ERROR] MEGAUP_COOKIE_FILEHOSTING and MEGAUP_FOLDER_ID must be set in environment!"
   exit 1
 fi
 
