@@ -24,12 +24,12 @@ Configure the following variables in your `.env` file or hosting environment:
 
 | Variable | Description | Required | Default |
 | :--- | :--- | :--- | :--- |
-| `BOT_TOKEN` | Telegram Bot Token (from [@BotFather](https://t.me/BotFather)) | Yes | — |
-| `API_ID` | Telegram API ID (from [my.telegram.org](https://my.telegram.org)) | Yes | — |
-| `API_HASH` | Telegram API Hash (from [my.telegram.org](https://my.telegram.org)) | Yes | — |
-| `ALLOWED_USER_IDS` | Comma-separated Telegram User IDs allowed to use the bot (e.g. `12345678,87654321`) | Yes | — |
-| `MEGAUP_API_KEY` | Megaup API Key 1 (Upload Key) | No | Script Default |
-| `MEGAUP_FOLDER_ID` | Target Megaup Folder ID | No | `63172` |
+| `BOT_TOKEN` | Telegram Bot Token (from [@BotFather](https://t.me/BotFather)) | **Yes** | — |
+| `API_ID` | Telegram API ID (from [my.telegram.org](https://my.telegram.org)) | **Yes** | — |
+| `API_HASH` | Telegram API Hash (from [my.telegram.org](https://my.telegram.org)) | **Yes** | — |
+| `ALLOWED_USER_IDS` | Comma-separated Telegram User IDs allowed to use the bot | **Yes** | — |
+| `MEGAUP_API_KEY` | Megaup API Key 1 (Upload Key from your account) | **Yes** | — |
+| `MEGAUP_FOLDER_ID` | Target Megaup Folder ID | **Yes** | — |
 | `MEGAUP_UPLOAD_URL` | Megaup Upload Endpoint | No | `https://megaup.net/api/v2/file/upload` |
 | `TEMP_DOWNLOAD_DIR` | Temporary download storage path | No | `/downloads` |
 | `MAX_FILE_BYTES` | Maximum allowed file size in bytes | No | `5368709120` (5 GB) |
@@ -37,8 +37,6 @@ Configure the following variables in your `.env` file or hosting environment:
 ---
 
 ## 🚀 Quick Start & Deployment
-
-### 1. Local / Docker Deployment
 
 1. **Clone the repository:**
    ```bash
