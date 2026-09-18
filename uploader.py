@@ -2,6 +2,7 @@ import os
 import logging
 import pathlib
 import requests
+from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -12,11 +13,7 @@ MEGAUP_UPLOAD_URL = os.environ.get(
 MEGAUP_API_KEY = os.environ.get("MEGAUP_API_KEY")
 MEGAUP_FOLDER_ID = os.environ.get("MEGAUP_FOLDER_ID")
 
-def megaup_upload(file_path: pathlib.Path | str) -> dict:
-    """
-    Upload a local file to Megaup.net API v2.
-    Requires MEGAUP_API_KEY and MEGAUP_FOLDER_ID to be configured.
-    """
+def megaup_upload(file_path: pathlib.Path | str, progress_callback=None) -> dict:
     if not MEGAUP_API_KEY:
         raise ValueError("Missing required environment variable: MEGAUP_API_KEY")
     if not MEGAUP_FOLDER_ID:
@@ -26,22 +23,30 @@ def megaup_upload(file_path: pathlib.Path | str) -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"File not found: {path}")
 
-    form_data = {
-        "key1": MEGAUP_API_KEY,
-        "folder_id": str(MEGAUP_FOLDER_ID),
-    }
-
-    file_size_mb = path.stat().st_size / (1024 * 1024)
+    total_size = path.stat().st_size
     logger.info("Uploading %s (%.2f MB) to Megaup folder %s...", 
-                path.name, file_size_mb, MEGAUP_FOLDER_ID)
+                path.name, total_size / (1024 * 1024), MEGAUP_FOLDER_ID)
 
     with open(path, "rb") as fh:
-        files = {"file": (path.name, fh)}
+        encoder = MultipartEncoder(
+            fields={
+                "key1": MEGAUP_API_KEY,
+                "folder_id": str(MEGAUP_FOLDER_ID),
+                "file": (path.name, fh, "application/octet-stream"),
+            }
+        )
+
+        def _monitor_callback(monitor):
+            if progress_callback:
+                progress_callback(monitor.bytes_read, total_size)
+
+        monitor = MultipartEncoderMonitor(encoder, _monitor_callback)
+
         response = requests.post(
-            MEGAUP_UPLOAD_URL, 
-            data=form_data, 
-            files=files, 
-            timeout=900
+            MEGAUP_UPLOAD_URL,
+            data=monitor,
+            headers={"Content-Type": monitor.content_type},
+            timeout=1800,
         )
 
     response.raise_for_status()
