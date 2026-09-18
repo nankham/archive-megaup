@@ -36,9 +36,10 @@ Configure the following variables in your `.env` file or hosting environment:
 
 ---
 
-## 🚀 Quick Start & Deployment
+## 📖 Usage Guide
 
-1. **Clone the repository:**
-   ```bash
-   git clone <repo-url>
-   cd <repo-folder>
+1. Open a chat with your deployed bot on Telegram.
+2. Send `/start` to verify connectivity.
+3. Send the download command along with an Archive.org details URL:
+   ```text
+   /download [https://archive.org/details/](https://archive.org/details/)<identifier>
