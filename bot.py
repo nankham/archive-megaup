@@ -215,7 +215,7 @@ async def pickformat(client, cq: CallbackQuery):
     ident = job["identifier"]
     metadata_info = job.get("meta", {}).get("metadata", {})
     
-    # 1. Album Folder Name သတ်မှတ်ပြီး Megaup ပေါ်တွင် တည်ဆောက်ခြင်း
+    # 1. Album Title သန့်စင်ပြီး Megaup ပေါ်တွင် တည်ဆောက်ခြင်း
     album_title = metadata_info.get("title") or ident
     m = cq.message
     await m.edit(f"📁 Creating dedicated folder on Megaup:\n`{album_title}`...")
@@ -225,7 +225,7 @@ async def pickformat(client, cq: CallbackQuery):
     target_dir = TEMP_DIR / ident
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. ရွေးထားသော format နှင့် Album Art/Cover ဓာတ်ပုံ ရှာဖွေခြင်း
+    # 2. Cover / Album Art ဖိုင် ရှာဖွေခြင်း
     target_files = [f for f in job["files"] if f.get("format") == format_]
     
     image_files = [
