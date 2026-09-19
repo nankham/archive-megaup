@@ -1,18 +1,18 @@
 import os
-import logging
-import asyncio
+import re
+import time
 import shutil
 import pathlib
-import time
-import math
-import requests
+import logging
+import asyncio
 from urllib.parse import quote
-from collections import defaultdict
+from functools import wraps
+
+import requests
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, MessageNotModified
-from archive_scraper import parse_archive_url, fetch_metadata, list_files_from_metadata
-from uploader import megaup_upload
+from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+
+from uploader import megaup_upload, create_or_get_folder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,245 +20,244 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-TEMP_DIR = pathlib.Path(os.environ.get("TEMP_DOWNLOAD_DIR", "/downloads")).resolve()
-MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", str(5 * 1024 ** 3)))
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH")
 
-_raw_ids = os.environ.get("ALLOWED_USER_IDS", "")
-ALLOWED_USER_IDS: set[int] = {
-    int(uid.strip()) for uid in _raw_ids.split(",") if uid.strip().isdigit()
-}
+# Whitelist Telegram User IDs
+ALLOWED_USER_IDS = [
+    int(uid.strip())
+    for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",")
+    if uid.strip().isdigit()
+]
 
+TEMP_DIR = pathlib.Path(os.environ.get("TEMP_DOWNLOAD_DIR", "/downloads"))
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Client(
-    "archive_megaup_bot",
+    "megaup_archive_bot",
+    bot_token=BOT_TOKEN,
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True,
+    in_memory=True
 )
 
-JOBS: dict[str, dict] = {}
+JOBS = {}
 
 
 def authorized(func):
-    async def wrapper(client, update):
-        user = update.from_user if hasattr(update, "from_user") and update.from_user else update.message.from_user
-        user_id = user.id if user else None
-        
+    @wraps(func)
+    async def wrapper(client, update, *args, **kwargs):
+        user_id = update.from_user.id if update.from_user else None
         if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
-            logger.warning("Unauthorized access attempt from user_id=%s", user_id)
-            if hasattr(update, "answer"):
-                await update.answer("❌ You are not authorized to use this bot.", show_alert=True)
-            else:
-                await update.reply_text("❌ You are not authorized to use this bot.")
+            if isinstance(update, Message):
+                await update.reply_text("⛔ Unauthorized user access denied.")
+            elif isinstance(update, CallbackQuery):
+                await update.answer("⛔ Unauthorized user access denied.", show_alert=True)
             return
-        return await func(client, update)
-    wrapper.__name__ = func.__name__
+        return await func(client, update, *args, **kwargs)
     return wrapper
 
 
-def human_readable_size(size_bytes: int) -> str:
-    if size_bytes == 0:
-        return "0B"
-    size_names = ("B", "KB", "MB", "GB", "TB")
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_names[i]}"
-
-
-def make_progress_bar(percent: int) -> str:
-    done = percent // 10
-    remaining = 10 - done
-    return f"[{'■' * done}{'□' * remaining}]"
+def safe_child_path(base_dir: pathlib.Path, file_name: str) -> pathlib.Path:
+    base_dir = base_dir.resolve()
+    target_path = (base_dir / file_name).resolve()
+    if not str(target_path).startswith(str(base_dir)):
+        raise ValueError(f"Directory traversal attack detected: {file_name}")
+    return target_path
 
 
 class ProgressTracker:
-    def __init__(self, loop, message, task_name, filename, file_idx, total_files):
+    def __init__(self, loop, message: Message, phase: str, filename: str, index: int, total: int):
         self.loop = loop
         self.message = message
-        self.task_name = task_name
+        self.phase = phase
         self.filename = filename
-        self.file_idx = file_idx
-        self.total_files = total_files
+        self.index = index
+        self.total = total
         self.start_time = time.time()
-        self.last_edit_time = 0
+        self.last_update_time = 0
+        self.last_text = ""
 
     def update(self, current: int, total: int):
         now = time.time()
-        # FloodWait မထိစေရန် 3 စက္ကန့်လျှင် တစ်ကြိမ်သာ edit ပြုလုပ်မည်
-        if now - self.last_edit_time < 3 and current < total:
+        if now - self.last_update_time < 3 and current < total:
             return
+        self.last_update_time = now
 
-        self.last_edit_time = now
-        total = total or 1
-        current = min(current, total)
-        percent = int(current * 100 / total)
+        percent = (current / total) * 100 if total > 0 else 0
         elapsed = now - self.start_time
         speed = current / elapsed if elapsed > 0 else 0
         eta = (total - current) / speed if speed > 0 else 0
 
-        eta_str = time.strftime("%H:%M:%S", time.gmtime(eta)) if eta < 86400 else "> 1 day"
-        bar = make_progress_bar(percent)
+        bar_len = 12
+        filled = int(bar_len * percent / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
 
         text = (
-            f"**{self.task_name} ({self.file_idx}/{self.total_files})**\n"
+            f"📦 **Batch Progress ({self.index}/{self.total})**\n"
             f"📄 `{self.filename}`\n\n"
-            f"{bar} {percent}%\n"
-            f"**Processed:** {human_readable_size(current)}\n"
-            f"**Size:** {human_readable_size(total)}\n"
-            f"**Speed:** {human_readable_size(int(speed))}/s\n"
-            f"**ETA:** {eta_str}"
+            f"{self.phase}...\n"
+            f"`[{bar}] {percent:.1f}%`\n"
+            f"⚡ **Speed:** {speed / (1024*1024):.2f} MB/s\n"
+            f"⏳ **ETA:** {int(eta)}s | 💾 **Done:** {current / (1024*1024):.2f}/{total / (1024*1024):.2f} MB"
         )
 
-        asyncio.run_coroutine_threadsafe(self._safe_edit(text), self.loop)
+        if text != self.last_text:
+            self.last_text = text
+            asyncio.run_coroutine_threadsafe(self._edit_message(text), self.loop)
 
-    async def _safe_edit(self, text: str):
+    async def _edit_message(self, text: str):
         try:
-            await self.message.edit(text)
-        except (FloodWait, MessageNotModified, Exception):
+            await self.message.edit_text(text)
+        except Exception:
             pass
 
 
-def safe_child_path(base: pathlib.Path, untrusted_name: str) -> pathlib.Path:
-    candidate = (base / untrusted_name).resolve()
-    if not str(candidate).startswith(str(base)):
-        raise ValueError(f"Path traversal detected: {untrusted_name!r}")
-    return candidate
-
-
-def stream_download_with_progress(url: str, dest: pathlib.Path, progress_callback, max_bytes: int = MAX_FILE_BYTES) -> None:
+def stream_download_with_progress(url: str, dest_path: pathlib.Path, progress_callback=None):
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
     with requests.get(url, stream=True, timeout=60) as r:
         r.raise_for_status()
-        content_length = int(r.headers.get("Content-Length", 0))
-        if content_length > max_bytes:
-            raise RuntimeError(
-                f"File exceeds limit: ({content_length / 1024**3:.2f} GB > {max_bytes / 1024**3:.2f} GB)"
-            )
-
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        written = 0
-        with open(dest, "wb") as fh:
-            for chunk in r.iter_content(1024 * 512):
+        total_size = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if chunk:
-                    written += len(chunk)
-                    if written > max_bytes:
-                        fh.close()
-                        dest.unlink(missing_ok=True)
-                        raise RuntimeError(f"File exceeded size limit of {max_bytes / 1024**3:.2f} GB")
-                    fh.write(chunk)
+                    f.write(chunk)
+                    downloaded += len(chunk)
                     if progress_callback:
-                        progress_callback(written, content_length or written)
+                        progress_callback(downloaded, total_size)
 
 
 @app.on_message(filters.command("start"))
 @authorized
-async def start_cmd(client, message):
+async def start_cmd(client, message: Message):
     await message.reply_text(
-        "👋 **Archive.org to Megaup Uploader Bot**\n\n"
-        "Send `/download <archive.org link>` to start.\n"
-        "Example:\n`/download https://archive.org/details/<identifier>`"
+        "👋 **Welcome to Archive.org to Megaup Pipeline Bot**\n\n"
+        "Send me any Archive.org link via `/download <link>`\n"
+        "Example:\n"
+        "`/download https://archive.org/details/john-coltrane-quartet-crescent-high-res`"
     )
 
 
 @app.on_message(filters.command("download"))
 @authorized
-async def download_cmd(client, message):
-    if len(message.command) < 2:
+async def download_cmd(client, message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         await message.reply_text("Usage: `/download https://archive.org/details/<identifier>`")
         return
 
-    url = message.command[1]
-    ident = parse_archive_url(url)
-    if not ident:
-        await message.reply_text("❌ Invalid archive.org URL or identifier not found.")
+    url = args[1].strip()
+    match = re.search(r"archive\.org/details/([^/?#]+)", url)
+    if not match:
+        await message.reply_text("❌ Invalid Archive.org details URL format.")
         return
 
-    msg = await message.reply_text(f"🔍 Fetching metadata for `{ident}`...")
+    identifier = match.group(1)
+    status_msg = await message.reply_text(f"🔍 Fetching metadata for `{identifier}`...")
+
     try:
-        meta = fetch_metadata(ident)
-        files = list_files_from_metadata(meta)
-        if not files:
-            await msg.edit("❌ No downloadable files found in this archive item.")
-            return
-
-        jobid = f"{message.chat.id}:{message.id}"
-        JOBS[jobid] = {"identifier": ident, "files": files, "meta": meta}
-
-        format_counts: dict[str, int] = defaultdict(int)
-        for f in files:
-            fmt = f.get("format", "Unknown")
-            format_counts[fmt] += 1
-
-        buttons = [
-            [InlineKeyboardButton(f"{fmt} ({count} files)", callback_data=f"pickformat|{jobid}|{fmt}")]
-            for fmt, count in sorted(format_counts.items())
-        ]
-        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{jobid}")])
-
-        await msg.edit(
-            f"📦 **Archive Item:** `{ident}`\n"
-            f"📁 **Total Files Available:** {len(files)}\n\n"
-            "Select the format to download and upload to Megaup:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        meta_url = f"https://archive.org/metadata/{identifier}"
+        res = requests.get(meta_url, timeout=30)
+        res.raise_for_status()
+        meta_data = res.json()
     except Exception as exc:
-        logger.exception(exc)
-        await msg.edit(f"❌ Error fetching metadata: {exc}")
+        await status_msg.edit(f"❌ Failed to retrieve Archive.org metadata: {exc}")
+        return
+
+    files = meta_data.get("files", [])
+    if not files:
+        await status_msg.edit("❌ No downloadable files found in this item.")
+        return
+
+    # Filter distinct formats
+    formats = {}
+    for f in files:
+        fmt = f.get("format")
+        if fmt and fmt not in ("Metadata", "Item Tile", "Archive BitTorrent"):
+            formats[fmt] = formats.get(fmt, 0) + 1
+
+    if not formats:
+        await status_msg.edit("❌ No suitable audio/media formats found.")
+        return
+
+    job_id = str(uuid.uuid4())[:8]
+    JOBS[job_id] = {
+        "identifier": identifier,
+        "files": files,
+        "meta": meta_data,
+    }
+
+    buttons = [
+        [InlineKeyboardButton(f"{fmt} ({count} files)", callback_data=f"pickformat|{job_id}|{fmt}")]
+        for fmt, count in formats.items()
+    ]
+    title = meta_data.get("metadata", {}).get("title", identifier)
+
+    await status_msg.edit(
+        f"🎵 **Album:** `{title}`\n"
+        f"Select the format to download and upload to Megaup:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 @app.on_callback_query(filters.regex(r"^pickformat\|"))
 @authorized
-async def pickformat(client, cq):
+async def pickformat(client, cq: CallbackQuery):
     _, jobid, format_ = cq.data.split("|", 2)
     await cq.answer()
 
     job = JOBS.get(jobid)
     if not job:
-        await cq.message.edit("❌ Job session expired. Please send the link again.", reply_markup=None)
+        await cq.message.edit("❌ Job session expired. Please re-send the link.", reply_markup=None)
         return
 
     ident = job["identifier"]
+    metadata_info = job.get("meta", {}).get("metadata", {})
+    
+    # 1. Album Title သန့်စင်ပြီး Megaup တွင် သီးခြား Folder ဆောက်ခြင်း
+    album_title = metadata_info.get("title") or ident
+    safe_folder_name = "".join(c for c in album_title if c not in r'\/:*?"<>|').strip()[:80]
+    
+    m = cq.message
+    await m.edit(f"📁 Creating Megaup Album Folder:\n`{safe_folder_name}`...")
+    target_folder_id = await asyncio.to_thread(create_or_get_folder, safe_folder_name)
+
     target_dir = TEMP_DIR / ident
     target_dir.mkdir(parents=True, exist_ok=True)
-    m = cq.message
 
-    await m.edit(
-        f"🚀 **Pipeline started**\n"
-        f"📁 Item: `{ident}`\n"
-        f"🎵 Format: `{format_}`\n\n"
-        "Initializing transfer...",
-        reply_markup=None,
-    )
-
-    uploaded_links = []
+    # 2. ရွေးချယ်ထားသော Format နှင့် Cover/Album Art ဖိုင်များကို ထုတ်ယူခြင်း
     target_files = [f for f in job["files"] if f.get("format") == format_]
+    
+    # Cover / Thumbnail Image များ ရှာဖွေခြင်း
+    image_files = [
+        f for f in job["files"] 
+        if any(f.get("name", "").lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png"])
+        or "Item Image" in f.get("format", "")
+        or "Thumbnail" in f.get("format", "")
+    ]
+    if image_files:
+        cover_file = image_files[0]
+        if cover_file not in target_files:
+            target_files.insert(0, cover_file)
+
     total_files = len(target_files)
     downloaded_count = 0
+    uploaded_links = []
     loop = asyncio.get_running_loop()
 
     try:
         for idx, file_info in enumerate(target_files, start=1):
             filename = file_info["name"]
-
-            try:
-                local_path = safe_child_path(target_dir, filename)
-            except ValueError as exc:
-                logger.error("Path traversal blocked: %s", exc)
-                continue
-
+            local_path = safe_child_path(target_dir, filename)
             safe_filename = quote(filename, safe="/")
             download_url = f"https://archive.org/download/{ident}/{safe_filename}"
 
             success = False
             for attempt in range(3):
                 try:
-                    # 1. Download stream with Live Progress
+                    # Download Step
                     dl_tracker = ProgressTracker(loop, m, "⬇️ Downloading", filename, idx, total_files)
                     await asyncio.to_thread(
                         stream_download_with_progress,
@@ -267,23 +266,17 @@ async def pickformat(client, cq):
                         dl_tracker.update
                     )
 
-                    # 2. Megaup API Upload with Live Progress
-                    up_tracker = ProgressTracker(loop, m, "⬆️ Uploading to Megaup", filename, idx, total_files)
+                    # Upload Step to Album Folder
+                    up_tracker = ProgressTracker(loop, m, f"⬆️ Uploading to [{safe_folder_name}]", filename, idx, total_files)
                     res = await asyncio.to_thread(
                         megaup_upload,
                         local_path,
+                        target_folder_id,
                         up_tracker.update
                     )
 
-                    file_data = res.get("data", res)
-                    dl_url = (
-                        file_data.get("url")
-                        or file_data.get("download_url")
-                        or file_data.get("short_url")
-                        or "Upload successful (No URL returned)"
-                    )
+                    dl_url = res.get("url") or res.get("short_url") or "Link Generated"
                     uploaded_links.append(f"✅ `{filename}`\n🔗 {dl_url}")
-
                     downloaded_count += 1
                     success = True
                     break
@@ -297,8 +290,7 @@ async def pickformat(client, cq):
             if not success:
                 uploaded_links.append(f"❌ `{filename}`: Upload failed")
 
-        # Result presentation
-        result_header = f"🎉 **Upload Completed ({downloaded_count}/{total_files})**\n\n"
+        result_header = f"🎉 **Album Uploaded: {safe_folder_name} ({downloaded_count}/{total_files})**\n\n"
         result_text = result_header + "\n\n".join(uploaded_links)
 
         if len(result_text) > 4000:
@@ -317,16 +309,6 @@ async def pickformat(client, cq):
         JOBS.pop(jobid, None)
 
 
-@app.on_callback_query(filters.regex(r"^cancel\|"))
-@authorized
-async def cancel(client, cq):
-    _, jobid = cq.data.split("|", 1)
-    await cq.answer("Operation cancelled.")
-    JOBS.pop(jobid, None)
-    await cq.message.edit("❌ Operation cancelled by user.", reply_markup=None)
-
-
 if __name__ == "__main__":
-    if not ALLOWED_USER_IDS:
-        logger.warning("ALLOWED_USER_IDS is empty. Bot is publicly accessible.")
+    logger.info("Megaup Archive Telegram Bot starting...")
     app.run()
