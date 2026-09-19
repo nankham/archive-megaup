@@ -37,10 +37,7 @@ def get_authenticated_session() -> requests.Session:
 
 
 def resolve_upload_url(session: requests.Session) -> str:
-    """
-    Dynamically discover the active upload storage node and signature keys
-    from Megaup dashboard HTML/JS for the authenticated user session.
-    """
+    """Discover active storage node or fallback to direct URL."""
     global _RESOLVED_UPLOAD_URL
     if _RESOLVED_UPLOAD_URL:
         return _RESOLVED_UPLOAD_URL
@@ -48,17 +45,14 @@ def resolve_upload_url(session: requests.Session) -> str:
     try:
         res = session.get(f"{MEGAUP_BASE}/", timeout=30)
         res.raise_for_status()
-
-        # Yetishare v5 storage node pattern
         match = re.search(r'https?://[a-zA-Z0-9_\-\.]+\.mupload\.store/ajax/file_upload_handler[^\s\'"]*', res.text)
         if match:
             _RESOLVED_UPLOAD_URL = match.group(0).replace("&amp;", "&")
-            logger.info("Dynamically resolved Megaup upload node: %s", _RESOLVED_UPLOAD_URL)
+            logger.info("Auto-discovered Storage Node: %s", _RESOLVED_UPLOAD_URL)
             return _RESOLVED_UPLOAD_URL
     except Exception as exc:
         logger.warning("Dynamic node resolution failed: %s", exc)
 
-    # Fallback to manual environment variable if provided
     if MEGAUP_FALLBACK_NODE_URL:
         logger.info("Using configured MEGAUP_DIRECT_NODE_URL fallback.")
         _RESOLVED_UPLOAD_URL = MEGAUP_FALLBACK_NODE_URL
@@ -68,36 +62,49 @@ def resolve_upload_url(session: requests.Session) -> str:
 
 
 def create_or_get_folder(folder_name: str, parent_id: str = None) -> str:
-    """Create a new folder inside parent folder on Megaup and return its folder_id."""
-    parent_id = parent_id or MEGAUP_PARENT_FOLDER_ID
+    """
+    Create a dedicated Album folder inside the parent directory on Megaup.
+    Uses verified payload and captures folder_id directly from JSON response.
+    """
+    parent_id = str(parent_id or MEGAUP_PARENT_FOLDER_ID)
     session = get_authenticated_session()
-    url = f"{MEGAUP_BASE}/account/ajax/add_folder"
+    url = f"{MEGAUP_BASE}/account/ajax/add_edit_folder"
 
     payload = {
-        "folder_name": folder_name,
-        "parent_folder_id": str(parent_id),
+        "folderName": folder_name,
+        "parentId": parent_id,
+        "isPublic": "1",
+        "password": "",
+        "watermarkPreviews": "0",
+        "showDownloadLinks": "1",
+        "submitme": "1",
+    }
+
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"{MEGAUP_BASE}/",
+        "Origin": MEGAUP_BASE,
     }
 
     try:
-        res = session.post(
-            url,
-            data=payload,
-            headers={"X-Requested-With": "XMLHttpRequest"},
-            timeout=30,
-        )
+        res = session.post(url, data=payload, headers=headers, timeout=30)
+        res.raise_for_status()
         data = res.json()
-        if data.get("folder_id"):
-            logger.info("Created Megaup folder '%s' with ID: %s", folder_name, data["folder_id"])
-            return str(data["folder_id"])
-    except Exception as exc:
-        logger.warning("Could not create folder '%s': %s. Falling back to parent ID: %s", folder_name, exc, parent_id)
+        logger.info("Megaup Folder Creation Response: %s", data)
 
-    return str(parent_id)
+        if data.get("success") and data.get("folder_id"):
+            new_folder_id = str(data["folder_id"])
+            logger.info("Successfully created Album Folder '%s' with ID: %s", folder_name, new_folder_id)
+            return new_folder_id
+    except Exception as exc:
+        logger.warning("Could not auto-create folder '%s': %s. Falling back to parent ID: %s", folder_name, exc, parent_id)
+
+    return parent_id
 
 
 def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, progress_callback=None) -> dict:
-    """Upload a file using session cookies directly to the Mupload Storage Node."""
-    folder_id = target_folder_id or MEGAUP_PARENT_FOLDER_ID
+    """Upload a file directly into target Album folder in 15 MB chunks."""
+    folder_id = str(target_folder_id or MEGAUP_PARENT_FOLDER_ID)
     path = pathlib.Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"File not found: {path}")
@@ -109,7 +116,7 @@ def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, p
     session = get_authenticated_session()
     upload_url = resolve_upload_url(session)
 
-    logger.info("Uploading %s (%.2f MB) to Megaup folder %s...", 
+    logger.info("Uploading %s (%.2f MB) into Album folder ID %s...", 
                 file_name, total_size / (1024 * 1024), folder_id)
 
     bytes_sent = 0
@@ -126,9 +133,9 @@ def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, p
             range_end = bytes_sent + chunk_len - 1
 
             form_data = {
-                "folder_id": str(folder_id),
-                "folderId": str(folder_id),
-                "upload_folder": str(folder_id),
+                "folder_id": folder_id,
+                "folderId": folder_id,
+                "upload_folder": folder_id,
                 "c_tracker": c_tracker,
                 "max_chunk_size": str(CHUNK_SIZE),
             }
@@ -154,13 +161,13 @@ def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, p
             try:
                 res_data = response.json()
             except Exception:
-                logger.warning("Storage Node Non-JSON chunk response: %s", response.text[:200])
+                pass
 
             bytes_sent += chunk_len
             if progress_callback:
                 progress_callback(bytes_sent, total_size)
 
-    logger.info("Megaup final response for %s: %s", file_name, res_data)
+    logger.info("Upload completed for %s: %s", file_name, res_data)
 
     if isinstance(res_data, list) and len(res_data) > 0:
         res_data = res_data[0]
