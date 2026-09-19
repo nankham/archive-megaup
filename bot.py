@@ -288,7 +288,12 @@ async def pickformat(client, cq: CallbackQuery):
             if not success:
                 uploaded_links.append(f"❌ `{filename}`: Upload failed")
 
-        result_header = f"🎉 **Album Uploaded: {safe_folder_name} ({downloaded_count}/{total_files})**\n📁 Megaup Folder ID: `{target_folder_id}`\n\n"
+        result_header = (
+            f"🎉 **Album Uploaded Successfully!**\n"
+            f"📁 **Album:** `{safe_folder_name}`\n"
+            f"🆔 **Folder ID:** `{target_folder_id}`\n"
+            f"📊 **Files:** {downloaded_count}/{total_files}\n\n"
+        )
         result_text = result_header + "\n\n".join(uploaded_links)
 
         if len(result_text) > 4000:
