@@ -25,7 +25,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH")
 
-# Whitelist Telegram User IDs
 ALLOWED_USER_IDS = [
     int(uid.strip())
     for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",")
@@ -172,7 +171,6 @@ async def download_cmd(client, message: Message):
         await status_msg.edit("❌ No downloadable files found in this item.")
         return
 
-    # Filter distinct formats
     formats = {}
     for f in files:
         fmt = f.get("format")
@@ -222,7 +220,7 @@ async def pickformat(client, cq: CallbackQuery):
     safe_folder_name = "".join(c for c in album_title if c not in r'\/:*?"<>|').strip()[:80]
     
     m = cq.message
-    await m.edit(f"📁 Creating Megaup Album Folder:\n`{safe_folder_name}`...")
+    await m.edit(f"📁 Creating dedicated folder on Megaup:\n`{safe_folder_name}`...")
     target_folder_id = await asyncio.to_thread(create_or_get_folder, safe_folder_name)
 
     target_dir = TEMP_DIR / ident
@@ -231,7 +229,6 @@ async def pickformat(client, cq: CallbackQuery):
     # 2. ရွေးချယ်ထားသော Format နှင့် Cover/Album Art ဖိုင်များကို ထုတ်ယူခြင်း
     target_files = [f for f in job["files"] if f.get("format") == format_]
     
-    # Cover / Thumbnail Image များ ရှာဖွေခြင်း
     image_files = [
         f for f in job["files"] 
         if any(f.get("name", "").lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png"])
@@ -276,7 +273,7 @@ async def pickformat(client, cq: CallbackQuery):
                         up_tracker.update
                     )
 
-                    dl_url = res.get("url") or res.get("short_url") or "Link Generated"
+                    dl_url = res.get("url") or res.get("short_url") or "Uploaded"
                     uploaded_links.append(f"✅ `{filename}`\n🔗 {dl_url}")
                     downloaded_count += 1
                     success = True
@@ -291,7 +288,7 @@ async def pickformat(client, cq: CallbackQuery):
             if not success:
                 uploaded_links.append(f"❌ `{filename}`: Upload failed")
 
-        result_header = f"🎉 **Album Uploaded: {safe_folder_name} ({downloaded_count}/{total_files})**\n\n"
+        result_header = f"🎉 **Album Uploaded: {safe_folder_name} ({downloaded_count}/{total_files})**\n📁 Megaup Folder ID: `{target_folder_id}`\n\n"
         result_text = result_header + "\n\n".join(uploaded_links)
 
         if len(result_text) > 4000:
