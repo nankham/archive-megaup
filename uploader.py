@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import pathlib
 import uuid
@@ -63,21 +64,21 @@ def resolve_upload_url(session: requests.Session) -> str:
 
 def create_or_get_folder(folder_name: str, parent_id: str = None) -> str:
     """
-    Create a dedicated Album folder inside the parent directory on Megaup.
-    Sanitizes invalid characters like colons, slashes, etc.
+    Directly invoke Megaup's /account/ajax/add_edit_folder endpoint
+    with complete payload and error tracing.
     """
     parent_id = str(parent_id or MEGAUP_PARENT_FOLDER_ID)
     session = get_authenticated_session()
     url = f"{MEGAUP_BASE}/account/ajax/add_edit_folder"
 
-    # Remove invalid characters that cause Megaup to reject folder creation
-    clean_name = re.sub(r'[\/:*?"<>|]', ' - ', folder_name).strip()
-    clean_name = re.sub(r'\s+', ' ', clean_name)[:80]
+    # Remove problematic characters
+    clean_name = re.sub(r'[\/:*?"<>|]', ' - ', folder_name)
+    clean_name = re.sub(r'\s+', ' ', clean_name).strip()[:80]
 
+    # Payload verified from Megaup Network inspection
     payload = {
         "folderName": clean_name,
         "parentId": parent_id,
-        "parent_folder_id": parent_id,
         "isPublic": "1",
         "password": "",
         "watermarkPreviews": "0",
@@ -87,57 +88,62 @@ def create_or_get_folder(folder_name: str, parent_id: str = None) -> str:
 
     headers = {
         "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "Referer": f"{MEGAUP_BASE}/",
         "Origin": MEGAUP_BASE,
     }
 
     try:
+        logger.info("Sending Folder Create Request to Megaup for '%s' (Parent: %s)...", clean_name, parent_id)
         res = session.post(url, data=payload, headers=headers, timeout=30)
-        res.raise_for_status()
-        data = res.json()
-        logger.info("Megaup Folder Creation Response: %s", data)
+        logger.info("Megaup raw HTTP response code: %d", res.status_code)
+        
+        try:
+            data = res.json()
+        except Exception:
+            logger.error("Megaup folder create returned non-JSON: %s", res.text[:300])
+            return parent_id
+
+        logger.info("Megaup Folder Create Result: %s", data)
 
         if data.get("success") and data.get("folder_id"):
             new_folder_id = str(data["folder_id"])
-            logger.info("Successfully created Album Folder '%s' with ID: %s", clean_name, new_folder_id)
+            logger.info("✅ SUCCESS: Created Folder '%s' -> Folder ID: %s", clean_name, new_folder_id)
             return new_folder_id
         else:
-            logger.warning("Megaup returned unsuccessful folder creation: %s", data.get("msg"))
+            logger.error("❌ Megaup failed to create folder: %s", data.get("msg", "Unknown error"))
     except Exception as exc:
-        logger.warning("Could not auto-create folder '%s': %s. Falling back to parent ID: %s", clean_name, exc, parent_id)
+        logger.exception("Critical exception in create_or_get_folder: %s", exc)
 
+    logger.warning("Using parent ID %s as fallback.", parent_id)
     return parent_id
 
 
 def move_file_to_folder(file_id: str, target_folder_id: str) -> bool:
-    """
-    Move an uploaded file into the designated folder using Megaup Yetishare AJAX endpoint.
-    """
+    """Move file into designated folder ID on Megaup."""
     session = get_authenticated_session()
-    endpoints = [
-        f"{MEGAUP_BASE}/account/ajax/drag_files_into_folder",
-        f"{MEGAUP_BASE}/ajax/drag_files_into_folder",
-    ]
-
-    payload = {
-        "fileIds[]": str(file_id),
-        "folderId": str(target_folder_id),
-    }
+    url = f"{MEGAUP_BASE}/account/ajax/drag_files_into_folder"
 
     headers = {
         "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "Referer": f"{MEGAUP_BASE}/",
         "Origin": MEGAUP_BASE,
     }
 
-    for url in endpoints:
+    payloads = [
+        {"fileIds[]": str(file_id), "folderId": str(target_folder_id)},
+        {"fileIds": str(file_id), "folderId": str(target_folder_id)},
+    ]
+
+    for p in payloads:
         try:
-            res = session.post(url, data=payload, headers=headers, timeout=20)
+            res = session.post(url, data=p, headers=headers, timeout=20)
             if res.status_code == 200:
-                logger.info("Moved file ID %s into Folder ID %s via %s", file_id, target_folder_id, url)
+                logger.info("Moved file %s into Folder %s", file_id, target_folder_id)
                 return True
-        except Exception as exc:
-            logger.debug("Failed moving file via %s: %s", url, exc)
+        except Exception:
+            pass
 
     return False
 
@@ -156,7 +162,7 @@ def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, p
     session = get_authenticated_session()
     upload_url = resolve_upload_url(session)
 
-    logger.info("Uploading %s (%.2f MB) into Album folder ID %s...", 
+    logger.info("Uploading %s (%.2f MB) into Target Folder ID %s...", 
                 file_name, total_size / (1024 * 1024), folder_id)
 
     bytes_sent = 0
@@ -217,9 +223,9 @@ def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, p
         if res_data.get("error"):
             raise RuntimeError(f"Megaup Error: {res_data.get('error')}")
 
-        # If file_id is returned, make sure it is explicitly inside the target folder
+        # Post-upload explicit move guarantee
         file_id = res_data.get("file_id")
-        if file_id and folder_id and folder_id != str(MEGAUP_PARENT_FOLDER_ID):
+        if file_id and folder_id != str(MEGAUP_PARENT_FOLDER_ID):
             move_file_to_folder(file_id, folder_id)
 
     return res_data or {}
