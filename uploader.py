@@ -64,15 +64,20 @@ def resolve_upload_url(session: requests.Session) -> str:
 def create_or_get_folder(folder_name: str, parent_id: str = None) -> str:
     """
     Create a dedicated Album folder inside the parent directory on Megaup.
-    Uses verified payload and captures folder_id directly from JSON response.
+    Sanitizes invalid characters like colons, slashes, etc.
     """
     parent_id = str(parent_id or MEGAUP_PARENT_FOLDER_ID)
     session = get_authenticated_session()
     url = f"{MEGAUP_BASE}/account/ajax/add_edit_folder"
 
+    # Remove invalid characters that cause Megaup to reject folder creation
+    clean_name = re.sub(r'[\/:*?"<>|]', ' - ', folder_name).strip()
+    clean_name = re.sub(r'\s+', ' ', clean_name)[:80]
+
     payload = {
-        "folderName": folder_name,
+        "folderName": clean_name,
         "parentId": parent_id,
+        "parent_folder_id": parent_id,
         "isPublic": "1",
         "password": "",
         "watermarkPreviews": "0",
@@ -94,12 +99,47 @@ def create_or_get_folder(folder_name: str, parent_id: str = None) -> str:
 
         if data.get("success") and data.get("folder_id"):
             new_folder_id = str(data["folder_id"])
-            logger.info("Successfully created Album Folder '%s' with ID: %s", folder_name, new_folder_id)
+            logger.info("Successfully created Album Folder '%s' with ID: %s", clean_name, new_folder_id)
             return new_folder_id
+        else:
+            logger.warning("Megaup returned unsuccessful folder creation: %s", data.get("msg"))
     except Exception as exc:
-        logger.warning("Could not auto-create folder '%s': %s. Falling back to parent ID: %s", folder_name, exc, parent_id)
+        logger.warning("Could not auto-create folder '%s': %s. Falling back to parent ID: %s", clean_name, exc, parent_id)
 
     return parent_id
+
+
+def move_file_to_folder(file_id: str, target_folder_id: str) -> bool:
+    """
+    Move an uploaded file into the designated folder using Megaup Yetishare AJAX endpoint.
+    """
+    session = get_authenticated_session()
+    endpoints = [
+        f"{MEGAUP_BASE}/account/ajax/drag_files_into_folder",
+        f"{MEGAUP_BASE}/ajax/drag_files_into_folder",
+    ]
+
+    payload = {
+        "fileIds[]": str(file_id),
+        "folderId": str(target_folder_id),
+    }
+
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"{MEGAUP_BASE}/",
+        "Origin": MEGAUP_BASE,
+    }
+
+    for url in endpoints:
+        try:
+            res = session.post(url, data=payload, headers=headers, timeout=20)
+            if res.status_code == 200:
+                logger.info("Moved file ID %s into Folder ID %s via %s", file_id, target_folder_id, url)
+                return True
+        except Exception as exc:
+            logger.debug("Failed moving file via %s: %s", url, exc)
+
+    return False
 
 
 def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, progress_callback=None) -> dict:
@@ -136,6 +176,7 @@ def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, p
                 "folder_id": folder_id,
                 "folderId": folder_id,
                 "upload_folder": folder_id,
+                "upload_folder_id": folder_id,
                 "c_tracker": c_tracker,
                 "max_chunk_size": str(CHUNK_SIZE),
             }
@@ -172,7 +213,13 @@ def megaup_upload(file_path: pathlib.Path | str, target_folder_id: str = None, p
     if isinstance(res_data, list) and len(res_data) > 0:
         res_data = res_data[0]
 
-    if isinstance(res_data, dict) and res_data.get("error"):
-        raise RuntimeError(f"Megaup Error: {res_data.get('error')}")
+    if isinstance(res_data, dict):
+        if res_data.get("error"):
+            raise RuntimeError(f"Megaup Error: {res_data.get('error')}")
+
+        # If file_id is returned, make sure it is explicitly inside the target folder
+        file_id = res_data.get("file_id")
+        if file_id and folder_id and folder_id != str(MEGAUP_PARENT_FOLDER_ID):
+            move_file_to_folder(file_id, folder_id)
 
     return res_data or {}
