@@ -133,7 +133,7 @@ def stream_download_with_progress(url: str, dest_path: pathlib.Path, progress_ca
 @authorized
 async def start_cmd(client, message: Message):
     await message.reply_text(
-        "👋 **Welcome to Archive.org to Megaup Pipeline Bot**\n\n"
+        "👋 **Archive.org to Megaup Pipeline Bot**\n\n"
         "Send me any Archive.org link via `/download <link>`\n"
         "Example:\n"
         "`/download https://archive.org/details/john-coltrane-quartet-crescent-high-res`"
@@ -215,18 +215,17 @@ async def pickformat(client, cq: CallbackQuery):
     ident = job["identifier"]
     metadata_info = job.get("meta", {}).get("metadata", {})
     
-    # 1. Album Title သန့်စင်ပြီး Megaup တွင် သီးခြား Folder ဆောက်ခြင်း
+    # 1. Album Folder Name သတ်မှတ်ပြီး Megaup ပေါ်တွင် တည်ဆောက်ခြင်း
     album_title = metadata_info.get("title") or ident
-    safe_folder_name = "".join(c for c in album_title if c not in r'\/:*?"<>|').strip()[:80]
-    
     m = cq.message
-    await m.edit(f"📁 Creating dedicated folder on Megaup:\n`{safe_folder_name}`...")
-    target_folder_id = await asyncio.to_thread(create_or_get_folder, safe_folder_name)
+    await m.edit(f"📁 Creating dedicated folder on Megaup:\n`{album_title}`...")
+
+    target_folder_id = await asyncio.to_thread(create_or_get_folder, album_title)
 
     target_dir = TEMP_DIR / ident
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. ရွေးချယ်ထားသော Format နှင့် Cover/Album Art ဖိုင်များကို ထုတ်ယူခြင်း
+    # 2. ရွေးထားသော format နှင့် Album Art/Cover ဓာတ်ပုံ ရှာဖွေခြင်း
     target_files = [f for f in job["files"] if f.get("format") == format_]
     
     image_files = [
@@ -264,8 +263,8 @@ async def pickformat(client, cq: CallbackQuery):
                         dl_tracker.update
                     )
 
-                    # Upload Step to Album Folder
-                    up_tracker = ProgressTracker(loop, m, f"⬆️ Uploading to [{safe_folder_name}]", filename, idx, total_files)
+                    # Upload Step into Album Folder
+                    up_tracker = ProgressTracker(loop, m, f"⬆️ Uploading to [{album_title}]", filename, idx, total_files)
                     res = await asyncio.to_thread(
                         megaup_upload,
                         local_path,
@@ -289,8 +288,8 @@ async def pickformat(client, cq: CallbackQuery):
                 uploaded_links.append(f"❌ `{filename}`: Upload failed")
 
         result_header = (
-            f"🎉 **Album Uploaded Successfully!**\n"
-            f"📁 **Album:** `{safe_folder_name}`\n"
+            f"🎉 **Album Upload Complete!**\n"
+            f"📁 **Album Folder:** `{album_title}`\n"
             f"🆔 **Folder ID:** `{target_folder_id}`\n"
             f"📊 **Files:** {downloaded_count}/{total_files}\n\n"
         )
