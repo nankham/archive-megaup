@@ -6,6 +6,7 @@ import shutil
 import pathlib
 import logging
 import asyncio
+import zipfile
 from urllib.parse import quote
 from functools import wraps
 
@@ -33,6 +34,9 @@ ALLOWED_USER_IDS = [
 
 TEMP_DIR = pathlib.Path(os.environ.get("TEMP_DOWNLOAD_DIR", "/downloads"))
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+# 4GB Split threshold (4 * 1024 * 1024 * 1024 bytes)
+MAX_SPLIT_BYTES = 4 * 1024 * 1024 * 1024
 
 app = Client(
     "megaup_archive_bot",
@@ -67,6 +71,43 @@ def safe_child_path(base_dir: pathlib.Path, file_name: str) -> pathlib.Path:
     return target_path
 
 
+def split_large_file(file_path: pathlib.Path, chunk_size: int = MAX_SPLIT_BYTES) -> list[pathlib.Path]:
+    """Split a single archive file into multiple numbered parts if it exceeds chunk_size."""
+    file_size = file_path.stat().st_size
+    if file_size <= chunk_size:
+        return [file_path]
+
+    part_paths = []
+    part_num = 1
+    buffer_size = 32 * 1024 * 1024  # 32MB read buffer
+
+    with open(file_path, "rb") as src:
+        while True:
+            part_name = f"{file_path.name}.{part_num:03d}"
+            part_path = file_path.parent / part_name
+            written_bytes = 0
+
+            with open(part_path, "wb") as dest:
+                while written_bytes < chunk_size:
+                    to_read = min(buffer_size, chunk_size - written_bytes)
+                    chunk = src.read(to_read)
+                    if not chunk:
+                        break
+                    dest.write(chunk)
+                    written_bytes += len(chunk)
+
+            if written_bytes > 0:
+                part_paths.append(part_path)
+                part_num += 1
+            else:
+                part_path.unlink(missing_ok=True)
+                break
+
+    # Remove the original unsplit archive to reclaim disk space
+    file_path.unlink(missing_ok=True)
+    return part_paths
+
+
 class ProgressTracker:
     def __init__(self, loop, message: Message, phase: str, filename: str, index: int, total: int):
         self.loop = loop
@@ -95,12 +136,12 @@ class ProgressTracker:
         bar = "█" * filled + "░" * (bar_len - filled)
 
         text = (
-            f"📦 **Batch Progress ({self.index}/{self.total})**\n"
-            f"📄 `{self.filename}`\n\n"
+            f"⚡ **Batch Progress ({self.index}/{self.total})**\n"
+            f"📁 `{self.filename}`\n\n"
             f"{self.phase}...\n"
             f"`[{bar}] {percent:.1f}%`\n"
             f"⚡ **Speed:** {speed / (1024*1024):.2f} MB/s\n"
-            f"⏳ **ETA:** {int(eta)}s | 💾 **Done:** {current / (1024*1024):.2f}/{total / (1024*1024):.2f} MB"
+            f"⏳ **ETA:** {int(eta)}s | 📊 **Done:** {current / (1024*1024):.2f}/{total / (1024*1024):.2f} MB"
         )
 
         if text != self.last_text:
@@ -133,7 +174,7 @@ def stream_download_with_progress(url: str, dest_path: pathlib.Path, progress_ca
 @authorized
 async def start_cmd(client, message: Message):
     await message.reply_text(
-        "👋 **Archive.org to Megaup Pipeline Bot**\n\n"
+        "🚀 **Archive.org to Megaup Pipeline Bot**\n\n"
         "Send me any Archive.org link via `/download <link>`\n"
         "Example:\n"
         "`/download https://archive.org/details/john-coltrane-quartet-crescent-high-res`"
@@ -172,10 +213,16 @@ async def download_cmd(client, message: Message):
         return
 
     formats = {}
+    format_sizes = {}
     for f in files:
         fmt = f.get("format")
         if fmt and fmt not in ("Metadata", "Item Tile", "Archive BitTorrent"):
             formats[fmt] = formats.get(fmt, 0) + 1
+            try:
+                raw_sz = int(f.get("size", 0))
+            except (ValueError, TypeError):
+                raw_sz = 0
+            format_sizes[fmt] = format_sizes.get(fmt, 0) + raw_sz
 
     if not formats:
         await status_msg.edit("❌ No suitable audio/media formats found.")
@@ -186,17 +233,20 @@ async def download_cmd(client, message: Message):
         "identifier": identifier,
         "files": files,
         "meta": meta_data,
+        "format_sizes": format_sizes,
     }
 
-    buttons = [
-        [InlineKeyboardButton(f"{fmt} ({count} files)", callback_data=f"pickformat|{job_id}|{fmt}")]
-        for fmt, count in formats.items()
-    ]
+    buttons = []
+    for fmt, count in formats.items():
+        size_mb = format_sizes.get(fmt, 0) / (1024 * 1024)
+        size_label = f"{size_mb / 1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.1f} MB"
+        buttons.append([InlineKeyboardButton(f"{fmt} ({count} files ~ {size_label})", callback_data=f"pickformat|{job_id}|{fmt}")])
+
     title = meta_data.get("metadata", {}).get("title", identifier)
 
     await status_msg.edit(
         f"🎵 **Album:** `{title}`\n"
-        f"Select the format to download and upload to Megaup:",
+        f"Select the format to download and upload:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -212,96 +262,187 @@ async def pickformat(client, cq: CallbackQuery):
         await cq.message.edit("❌ Job session expired. Please re-send the link.", reply_markup=None)
         return
 
+    total_bytes = job.get("format_sizes", {}).get(format_, 0)
+    total_gb = total_bytes / (1024 * 1024 * 1024)
+
+    # Indicate auto-split status if total format size exceeds 4GB
+    split_info = " (Auto-split into 4GB parts)" if total_bytes > MAX_SPLIT_BYTES else ""
+
+    mode_buttons = [
+        [
+            InlineKeyboardButton("📁 Upload Individual Files", callback_data=f"process|{jobid}|{format_}|individual"),
+            InlineKeyboardButton(f"🗜️ Archive as .ZIP{split_info}", callback_data=f"process|{jobid}|{format_}|zip")
+        ]
+    ]
+
+    await cq.message.edit(
+        f"Selected Format: `{format_}` (~{total_gb:.2f} GB)\n\n"
+        f"Choose upload strategy for Megaup:",
+        reply_markup=InlineKeyboardMarkup(mode_buttons)
+    )
+
+
+@app.on_callback_query(filters.regex(r"^process\|"))
+@authorized
+async def process_download(client, cq: CallbackQuery):
+    _, jobid, format_, mode = cq.data.split("|", 3)
+    await cq.answer()
+
+    job = JOBS.get(jobid)
+    if not job:
+        await cq.message.edit("❌ Job session expired. Please re-send the link.", reply_markup=None)
+        return
+
     ident = job["identifier"]
     metadata_info = job.get("meta", {}).get("metadata", {})
-    
-    # 1. Album Title သန့်စင်ပြီး Megaup ပေါ်တွင် တည်ဆောက်ခြင်း
     album_title = metadata_info.get("title") or ident
     m = cq.message
-    await m.edit(f"📁 Creating dedicated folder on Megaup:\n`{album_title}`...")
+
+    await m.edit(f"📁 Preparing Megaup storage folder:\n`{album_title}`...")
 
     target_folder_id = await asyncio.to_thread(create_or_get_folder, album_title)
-
     target_dir = TEMP_DIR / ident
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Cover / Album Art ဖိုင် ရှာဖွေခြင်း
     target_files = [f for f in job["files"] if f.get("format") == format_]
-    
+
     image_files = [
-        f for f in job["files"] 
+        f for f in job["files"]
         if any(f.get("name", "").lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png"])
         or "Item Image" in f.get("format", "")
         or "Thumbnail" in f.get("format", "")
     ]
-    if image_files:
-        cover_file = image_files[0]
-        if cover_file not in target_files:
-            target_files.insert(0, cover_file)
+    if image_files and image_files[0] not in target_files:
+        target_files.insert(0, image_files[0])
 
     total_files = len(target_files)
-    downloaded_count = 0
-    uploaded_links = []
     loop = asyncio.get_running_loop()
 
     try:
-        for idx, file_info in enumerate(target_files, start=1):
-            filename = file_info["name"]
-            local_path = safe_child_path(target_dir, filename)
-            safe_filename = quote(filename, safe="/")
-            download_url = f"https://archive.org/download/{ident}/{safe_filename}"
+        if mode == "zip":
+            # Download all target files to local storage
+            downloaded_paths = []
+            for idx, file_info in enumerate(target_files, start=1):
+                filename = file_info["name"]
+                local_path = safe_child_path(target_dir, filename)
+                safe_filename = quote(filename, safe="/")
+                download_url = f"https://archive.org/download/{ident}/{safe_filename}"
 
-            success = False
-            for attempt in range(3):
-                try:
-                    # Download Step
-                    dl_tracker = ProgressTracker(loop, m, "⬇️ Downloading", filename, idx, total_files)
-                    await asyncio.to_thread(
-                        stream_download_with_progress,
-                        download_url,
-                        local_path,
-                        dl_tracker.update
-                    )
+                dl_tracker = ProgressTracker(loop, m, "⬇️ Downloading (ZIP Prep)", filename, idx, total_files)
+                await asyncio.to_thread(
+                    stream_download_with_progress,
+                    download_url,
+                    local_path,
+                    dl_tracker.update
+                )
+                downloaded_paths.append(local_path)
 
-                    # Upload Step into Album Folder
-                    up_tracker = ProgressTracker(loop, m, f"⬆️ Uploading to [{album_title}]", filename, idx, total_files)
-                    res = await asyncio.to_thread(
-                        megaup_upload,
-                        local_path,
-                        target_folder_id,
-                        up_tracker.update
-                    )
+            clean_zip_name = re.sub(r'[\/:*?"<>|]', '_', album_title).strip()[:70]
+            zip_filename = f"{clean_zip_name}.zip"
+            zip_path = safe_child_path(TEMP_DIR, zip_filename)
 
-                    dl_url = res.get("url") or res.get("short_url") or "Uploaded"
-                    uploaded_links.append(f"✅ `{filename}`\n🔗 {dl_url}")
-                    downloaded_count += 1
-                    success = True
-                    break
-                except Exception as exc:
-                    logger.error("Attempt %d failed for %s: %s", attempt + 1, filename, exc)
-                    if attempt < 2:
-                        await asyncio.sleep(5)
-                finally:
-                    local_path.unlink(missing_ok=True)
+            await m.edit(f"📦 Compressing into `{zip_filename}`...")
 
-            if not success:
-                uploaded_links.append(f"❌ `{filename}`: Upload failed")
+            def create_zip():
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                    for p in downloaded_paths:
+                        zipf.write(p, arcname=p.name)
 
-        result_header = (
-            f"🎉 **Album Upload Complete!**\n"
-            f"📁 **Album Folder:** `{album_title}`\n"
-            f"🆔 **Folder ID:** `{target_folder_id}`\n"
-            f"📊 **Files:** {downloaded_count}/{total_files}\n\n"
-        )
-        result_text = result_header + "\n\n".join(uploaded_links)
+            await asyncio.to_thread(create_zip)
 
-        if len(result_text) > 4000:
-            chunks = [result_text[i:i + 4000] for i in range(0, len(result_text), 4000)]
-            await m.edit(chunks[0])
-            for ch in chunks[1:]:
-                await m.reply_text(ch)
-        else:
+            # Check if compression result exceeds 4GB and auto-split if necessary
+            actual_zip_size = zip_path.stat().st_size
+            if actual_zip_size > MAX_SPLIT_BYTES:
+                await m.edit(f"✂️ File is {actual_zip_size / (1024**3):.2f} GB (> 4GB). Splitting into 4GB parts...")
+                upload_parts = await asyncio.to_thread(split_large_file, zip_path, MAX_SPLIT_BYTES)
+            else:
+                upload_parts = [zip_path]
+
+            uploaded_links = []
+            total_parts = len(upload_parts)
+
+            for idx, part_file in enumerate(upload_parts, start=1):
+                part_name = part_file.name
+                up_tracker = ProgressTracker(loop, m, f"⬆️ Uploading [{idx}/{total_parts}]", part_name, idx, total_parts)
+                res = await asyncio.to_thread(
+                    megaup_upload,
+                    part_file,
+                    target_folder_id,
+                    up_tracker.update
+                )
+                part_file.unlink(missing_ok=True)
+                dl_url = res.get("url") or res.get("short_url") or "Uploaded"
+                uploaded_links.append(f"📦 `{part_name}`\n🔗 {dl_url}")
+
+            result_header = (
+                f"🎉 **Archive Upload Complete!**\n"
+                f"📁 **Folder:** `{album_title}`\n"
+                f"📂 **Folder ID:** `{target_folder_id}`\n"
+                f"📊 **Total Parts:** {total_parts}\n\n"
+            )
+            result_text = result_header + "\n\n".join(uploaded_links)
             await m.edit(result_text)
+
+        else:
+            # Individual File Upload Logic
+            downloaded_count = 0
+            uploaded_links = []
+
+            for idx, file_info in enumerate(target_files, start=1):
+                filename = file_info["name"]
+                local_path = safe_child_path(target_dir, filename)
+                safe_filename = quote(filename, safe="/")
+                download_url = f"https://archive.org/download/{ident}/{safe_filename}"
+
+                success = False
+                for attempt in range(3):
+                    try:
+                        dl_tracker = ProgressTracker(loop, m, "⬇️ Downloading", filename, idx, total_files)
+                        await asyncio.to_thread(
+                            stream_download_with_progress,
+                            download_url,
+                            local_path,
+                            dl_tracker.update
+                        )
+
+                        up_tracker = ProgressTracker(loop, m, f"⬆️ Uploading to [{album_title}]", filename, idx, total_files)
+                        res = await asyncio.to_thread(
+                            megaup_upload,
+                            local_path,
+                            target_folder_id,
+                            up_tracker.update
+                        )
+
+                        dl_url = res.get("url") or res.get("short_url") or "Uploaded"
+                        uploaded_links.append(f"✅ `{filename}`\n🔗 {dl_url}")
+                        downloaded_count += 1
+                        success = True
+                        break
+                    except Exception as exc:
+                        logger.error("Attempt %d failed for %s: %s", attempt + 1, filename, exc)
+                        if attempt < 2:
+                            await asyncio.sleep(5)
+                    finally:
+                        local_path.unlink(missing_ok=True)
+
+                if not success:
+                    uploaded_links.append(f"❌ `{filename}`: Upload failed")
+
+            result_header = (
+                f"🎉 **Album Upload Complete!**\n"
+                f"📁 **Album Folder:** `{album_title}`\n"
+                f"📂 **Folder ID:** `{target_folder_id}`\n"
+                f"📊 **Files:** {downloaded_count}/{total_files}\n\n"
+            )
+            result_text = result_header + "\n\n".join(uploaded_links)
+
+            if len(result_text) > 4000:
+                chunks = [result_text[i:i + 4000] for i in range(0, len(result_text), 4000)]
+                await m.edit(chunks[0])
+                for ch in chunks[1:]:
+                    await m.reply_text(ch)
+            else:
+                await m.edit(result_text)
 
     except Exception as exc:
         logger.exception(exc)
